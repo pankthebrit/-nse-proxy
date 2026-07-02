@@ -31,7 +31,7 @@ def fetch(url):
     # Route every NSE request through ScraperAPI Indian residential IP
     proxy_url = (
         "https://api.scraperapi.com"
-        "?api_key="6cc24218f80cbe809c31ead716449724"
+        "?api_key=" + SCRAPER_KEY +
         "&url=" + requests.utils.quote(url, safe="") +
         "&country_code=in"
         "&render=false"
