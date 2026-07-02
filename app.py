@@ -1,9 +1,9 @@
-# app.py - NSE Proxy for Render.com
-# ScraperAPI routes through Indian residential IPs
-# Parallel fetching to stay within Gunicorn timeout
+# app.py - NSE Heatmap Proxy using Yahoo Finance
+# No proxy needed. No blocking. Free forever.
+# yfinance fetches NSE data (SYMBOL.NS) directly from Yahoo Finance servers
 
-import math, logging, concurrent.futures
-import requests
+import math, logging
+import yfinance as yf
 from flask import Flask, jsonify
 from flask_cors import CORS
 
@@ -13,57 +13,79 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
-SCRAPER_KEY = "6cc24218f80cbe809c31ead716449724"
+# Nifty 100 stocks — covers large + mid cap universe for gainers scan
+SYMBOLS = [
+    "RELIANCE","TCS","HDFCBANK","BHARTIARTL","ICICIBANK","INFY","SBIN",
+    "HINDUNILVR","ITC","KOTAKBANK","LT","BAJFINANCE","HCLTECH","AXISBANK",
+    "MARUTI","ASIANPAINT","SUNPHARMA","M&M","TITAN","NESTLEIND","ULTRACEMCO",
+    "DRREDDY","WIPRO","BAJAJFINSV","POWERGRID","NTPC","CIPLA","ONGC",
+    "TATASTEEL","COALINDIA","TECHM","GRASIM","INDUSINDBK","TATAMOTORS",
+    "ADANIPORTS","BRITANNIA","BPCL","EICHERMOT","SHRIRAMFIN","HEROMOTOCO",
+    "DIVISLAB","APOLLOHOSP","TATACONSUM","SBILIFE","HDFCLIFE","BAJAJ-AUTO",
+    "JSWSTEEL","HINDALCO","VEDL","ADANIENT","SIEMENS","HAL","BEL","ABB",
+    "PIDILITIND","DABUR","MARICO","GODREJCP","MCDOWELL-N","COLPAL","HAVELLS",
+    "VOLTAS","BERGEPAINT","TATAPOWER","ADANIGREEN","ADANIPOWER","CANBK",
+    "BANKBARODA","PNB","FEDERALBNK","IDFCFIRSTB","BANDHANBNK","RBLBANK",
+    "AUBANK","KARURVYSYA","MUTHOOTFIN","CHOLAFIN","BAJAJHLDNG","HDFCAMC",
+    "LICI","ICICIGI","SBICARD","ZOMATO","PAYTM","NAUKRI","POLICYBZR",
+    "DMART","TRENT","TITAN","JUBLFOOD","INDIAMART","IRCTC","CONCOR",
+    "IRFC","PFC","RECLTD","HUDCO","RVNL","NBCC","NTPC","SJVN",
+    "MANKIND","LUPIN","AUROPHARMA","TORNTPHARM","ALKEM","IPCALAB",
+    "LAURUS","GLAND","PPLPHARMA","AJANTPHARM","LAURUSLABS","GLENMARK"
+]
 
-BASE = "https://www.nseindia.com"
-URLS = {
-    "gainers": BASE + "/api/live-analysis-variations?index=gainers&limit=20",
-    "active":  BASE + "/api/live-analysis-most-active-securities?index=value&limit=50",
-    "volume":  BASE + "/api/live-analysis-volume-spurts?index=loosers",
-}
-
-def fetch(url):
-    proxy_url = (
-        "https://api.scraperapi.com"
-        "?api_key=" + SCRAPER_KEY +
-        "&url=" + requests.utils.quote(url, safe="") +
-        "&country_code=in"
-        "&render=false"
-    )
-    r = requests.get(proxy_url, timeout=55)
-    r.raise_for_status()
-    return r.json()
+YF_SYMBOLS = [s + ".NS" for s in SYMBOLS]
 
 def sf(v):
-    try: return float(v or 0)
+    try:
+        f = float(v)
+        return 0.0 if (f != f) else f   # handle NaN
     except: return 0.0
 
-def si(v):
-    try: return int(float(v or 0))
-    except: return 0
+def fetch_nse_data():
+    logger.info("Downloading data for " + str(len(YF_SYMBOLS)) + " stocks via Yahoo Finance...")
+    tickers = yf.Tickers(" ".join(YF_SYMBOLS))
 
-def parse(data, is_gainer=False):
-    rows = data if isinstance(data, list) else data.get("data", [])
-    out = {}
-    for it in rows:
-        sym = str(it.get("symbol","")).strip()
-        if not sym: continue
-        out[sym] = {
-            "symbol":      sym,
-            "series":      it.get("series","EQ"),
-            "ltp":         sf(it.get("lastPrice",    it.get("ltp",0))),
-            "prev_close":  sf(it.get("previousClose",it.get("previousPrice",0))),
-            "pct_change":  sf(it.get("pChange",0)),
-            "open":        sf(it.get("open",0)),
-            "high":        sf(it.get("dayHigh",  it.get("high",0))),
-            "low":         sf(it.get("dayLow",   it.get("low",0))),
-            "volume":      si(it.get("totalTradedVolume",it.get("quantityTraded",0))),
-            "turnover_cr": round(sf(it.get("totalTradedValue",
-                                   it.get("turnover",0)))/1e7, 2),
-            "is_gainer":   is_gainer,
-            "score":       0.0,
-        }
-    return out
+    results = []
+    for sym, ticker in tickers.tickers.items():
+        try:
+            info = ticker.fast_info
+            nse_sym = sym.replace(".NS", "")
+
+            ltp        = sf(info.last_price)
+            prev_close = sf(info.previous_close)
+            if ltp == 0 or prev_close == 0:
+                continue
+
+            pct_change = round((ltp - prev_close) / prev_close * 100, 2)
+            volume     = int(sf(info.three_month_average_volume or 0))
+            # Use day_volume if available
+            try:
+                day_vol = int(sf(info.shares))
+            except:
+                day_vol = volume
+
+            turnover_cr = round(ltp * day_vol / 1e7, 2)
+
+            results.append({
+                "symbol":      nse_sym,
+                "series":      "EQ",
+                "ltp":         round(ltp, 2),
+                "prev_close":  round(prev_close, 2),
+                "pct_change":  pct_change,
+                "open":        sf(info.open),
+                "high":        sf(info.day_high),
+                "low":         sf(info.day_low),
+                "volume":      day_vol,
+                "turnover_cr": turnover_cr,
+                "is_gainer":   pct_change > 0,
+                "score":       0.0,
+            })
+        except Exception as e:
+            logger.debug("Skip " + sym + ": " + str(e))
+
+    logger.info("Got data for " + str(len(results)) + " stocks")
+    return results
 
 def add_scores(items):
     n = len(items)
@@ -81,40 +103,22 @@ def add_scores(items):
 @app.route("/")
 def proxy():
     try:
-        logger.info("Fetching all 3 NSE endpoints in parallel via ScraperAPI...")
+        items = fetch_nse_data()
+        if not items:
+            return jsonify({"status":"error","message":"No data returned from Yahoo Finance"}), 500
 
-        # Fetch gainers, active, volume simultaneously — cuts total time by 3x
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
-            f_gainers = ex.submit(fetch, URLS["gainers"])
-            f_active  = ex.submit(fetch, URLS["active"])
-            f_volume  = ex.submit(fetch, URLS["volume"])
+        items = add_scores(items)
+        gainers = [d["symbol"] for d in items if d["pct_change"] > 0]
+        gainers.sort(key=lambda s: next(d["pct_change"] for d in items if d["symbol"]==s), reverse=True)
+        top20 = gainers[:20]
 
-            g_raw = f_gainers.result(timeout=58)
-            a_raw = f_active.result(timeout=58)
-            try:
-                v_raw = f_volume.result(timeout=58)
-            except Exception as e:
-                logger.warning("Volume skipped: " + str(e))
-                v_raw = {"data": []}
-
-        g = parse(g_raw, True)
-        a = parse(a_raw)
-        v = parse(v_raw)
-
-        merged = {**a, **v, **g}
-        for sym, d in merged.items():
-            d["is_gainer"] = sym in g
-
-        all_items = add_scores(list(merged.values()))
-        logger.info("OK - " + str(len(all_items)) + " stocks, " + str(len(g)) + " gainers")
-
+        logger.info("OK - " + str(len(items)) + " stocks, " + str(len(top20)) + " gainers")
         return jsonify({
             "status":        "ok",
-            "data":          all_items,
-            "top20_gainers": list(g.keys()),
-            "count":         len(all_items)
+            "data":          items,
+            "top20_gainers": top20,
+            "count":         len(items)
         })
-
     except Exception as e:
         logger.error(str(e), exc_info=True)
         return jsonify({"status":"error","message":str(e)}), 500
