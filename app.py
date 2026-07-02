@@ -5,7 +5,8 @@ import math, logging
 import yfinance as yf
 import warnings
 warnings.filterwarnings("ignore")
-
+import yfinance as yf
+yf.set_tz_cache_location("/tmp/yfinance_cache")
 from flask import Flask, jsonify
 from flask_cors import CORS
 
