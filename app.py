@@ -1,7 +1,7 @@
 # app.py - NSE Proxy for Render.com
-# Render IPs are NOT blocked by NSE
+# Uses ScraperAPI to route through Indian residential IPs (bypasses NSE block)
 
-import math, time, logging
+import math, logging
 import requests
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -12,41 +12,33 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
+# ── ScraperAPI key ──────────────────────────────────────────────────────────
+# Sign up free at scraperapi.com — paste your key here
+SCRAPER_KEY = "6cc24218f80cbe809c31ead716449724"
+
 BASE = "https://www.nseindia.com"
 URLS = {
     "gainers": BASE + "/api/live-analysis-variations?index=gainers&limit=20",
     "active":  BASE + "/api/live-analysis-most-active-securities?index=value&limit=50",
     "volume":  BASE + "/api/live-analysis-volume-spurts?index=loosers",
 }
-HTML_HDR = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-}
-API_HDR = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.nseindia.com/market-data/top-gainers-losers",
-    "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-}
 
 def get_session():
-    s = requests.Session()
-    try:
-        s.get(BASE, headers=HTML_HDR, timeout=15)
-        time.sleep(2)
-        s.get(BASE + "/market-data/top-gainers-losers", headers=HTML_HDR, timeout=15)
-        time.sleep(1)
-    except Exception as e:
-        logger.warning("Session: " + str(e))
-    return s
+    # ScraperAPI handles all cookies and headers automatically
+    return requests.Session()
+
+def fetch(url):
+    # Route every NSE request through ScraperAPI Indian residential IP
+    proxy_url = (
+        "https://api.scraperapi.com"
+        "?api_key="6cc24218f80cbe809c31ead716449724"
+        "&url=" + requests.utils.quote(url, safe="") +
+        "&country_code=in"
+        "&render=false"
+    )
+    r = requests.get(proxy_url, timeout=60)
+    r.raise_for_status()
+    return r.json()
 
 def sf(v):
     try: return float(v or 0)
@@ -95,15 +87,19 @@ def add_scores(items):
 @app.route("/")
 def proxy():
     try:
-        s = get_session()
-        logger.info("Fetching gainers...")
-        g = parse(s.get(URLS["gainers"], headers=API_HDR, timeout=20).json(), True)
+        logger.info("Fetching gainers via ScraperAPI...")
+        g = parse(fetch(URLS["gainers"]), True)
+
         logger.info("Fetching most active...")
-        a = parse(s.get(URLS["active"],  headers=API_HDR, timeout=20).json())
+        a = parse(fetch(URLS["active"]))
+
         v = {}
         try:
-            v = parse(s.get(URLS["volume"], headers=API_HDR, timeout=20).json())
-        except: pass
+            logger.info("Fetching volume spurts...")
+            v = parse(fetch(URLS["volume"]))
+        except Exception as e:
+            logger.warning("Volume skipped: " + str(e))
+
         merged = {**a, **v, **g}
         for sym, d in merged.items(): d["is_gainer"] = sym in g
         all_items = add_scores(list(merged.values()))
