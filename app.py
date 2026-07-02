@@ -1,7 +1,8 @@
 # app.py - NSE Proxy for Render.com
-# Uses ScraperAPI to route through Indian residential IPs (bypasses NSE block)
+# ScraperAPI routes through Indian residential IPs
+# Parallel fetching to stay within Gunicorn timeout
 
-import math, logging
+import math, logging, concurrent.futures
 import requests
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -12,8 +13,6 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
-# ── ScraperAPI key ──────────────────────────────────────────────────────────
-# Sign up free at scraperapi.com — paste your key here
 SCRAPER_KEY = "6cc24218f80cbe809c31ead716449724"
 
 BASE = "https://www.nseindia.com"
@@ -23,12 +22,7 @@ URLS = {
     "volume":  BASE + "/api/live-analysis-volume-spurts?index=loosers",
 }
 
-def get_session():
-    # ScraperAPI handles all cookies and headers automatically
-    return requests.Session()
-
 def fetch(url):
-    # Route every NSE request through ScraperAPI Indian residential IP
     proxy_url = (
         "https://api.scraperapi.com"
         "?api_key=" + SCRAPER_KEY +
@@ -36,7 +30,7 @@ def fetch(url):
         "&country_code=in"
         "&render=false"
     )
-    r = requests.get(proxy_url, timeout=60)
+    r = requests.get(proxy_url, timeout=55)
     r.raise_for_status()
     return r.json()
 
@@ -87,26 +81,40 @@ def add_scores(items):
 @app.route("/")
 def proxy():
     try:
-        logger.info("Fetching gainers via ScraperAPI...")
-        g = parse(fetch(URLS["gainers"]), True)
+        logger.info("Fetching all 3 NSE endpoints in parallel via ScraperAPI...")
 
-        logger.info("Fetching most active...")
-        a = parse(fetch(URLS["active"]))
+        # Fetch gainers, active, volume simultaneously — cuts total time by 3x
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            f_gainers = ex.submit(fetch, URLS["gainers"])
+            f_active  = ex.submit(fetch, URLS["active"])
+            f_volume  = ex.submit(fetch, URLS["volume"])
 
-        v = {}
-        try:
-            logger.info("Fetching volume spurts...")
-            v = parse(fetch(URLS["volume"]))
-        except Exception as e:
-            logger.warning("Volume skipped: " + str(e))
+            g_raw = f_gainers.result(timeout=58)
+            a_raw = f_active.result(timeout=58)
+            try:
+                v_raw = f_volume.result(timeout=58)
+            except Exception as e:
+                logger.warning("Volume skipped: " + str(e))
+                v_raw = {"data": []}
+
+        g = parse(g_raw, True)
+        a = parse(a_raw)
+        v = parse(v_raw)
 
         merged = {**a, **v, **g}
-        for sym, d in merged.items(): d["is_gainer"] = sym in g
+        for sym, d in merged.items():
+            d["is_gainer"] = sym in g
+
         all_items = add_scores(list(merged.values()))
-        logger.info("OK - " + str(len(all_items)) + " stocks")
-        return jsonify({"status":"ok","data":all_items,
-                        "top20_gainers":list(g.keys()),
-                        "count":len(all_items)})
+        logger.info("OK - " + str(len(all_items)) + " stocks, " + str(len(g)) + " gainers")
+
+        return jsonify({
+            "status":        "ok",
+            "data":          all_items,
+            "top20_gainers": list(g.keys()),
+            "count":         len(all_items)
+        })
+
     except Exception as e:
         logger.error(str(e), exc_info=True)
         return jsonify({"status":"error","message":str(e)}), 500
